@@ -11,8 +11,8 @@ from ..utils import has_torch_function, is_tensor_base_attr_getter
 from .base import VariableTracker
 from .constant import ConstantVariable
 from .lists import TupleVariable
-from .tensor import TensorVariable
-from .user_defined import UserDefinedClassVariable, UserDefinedObjectVariable
+from .tensor import TensorSubclassVariable, TensorVariable
+from .user_defined import UserDefinedObjectVariable
 
 
 # [Note: __torch_function__] This feature is a prototype and has some rough edges (contact mlazos with issues):
@@ -46,10 +46,7 @@ banned_attrs = [
 
 def _get_subclass_type(var):
     assert isinstance(var, (TensorWithTFOverrideVariable, UserDefinedObjectVariable))
-    if isinstance(var, TensorWithTFOverrideVariable):
-        return var.class_type()
-    elif isinstance(var, UserDefinedObjectVariable):
-        return var.python_type()
+    return var.python_type()
 
 
 def _get_subclass_type_var(tx, var):
@@ -57,7 +54,12 @@ def _get_subclass_type_var(tx, var):
     if isinstance(var, TensorWithTFOverrideVariable):
         return var.class_type_var()
     elif isinstance(var, UserDefinedObjectVariable):
-        return var.var_getattr(tx, "__class__")
+        from .builder import SourcelessBuilder, VariableBuilder
+
+        if var.source:
+            return VariableBuilder(tx, var.source)(var.python_type())
+        else:
+            return SourcelessBuilder()(tx, var.python_type())
 
 
 def _is_attr_overidden(tx, var, name):
@@ -76,10 +78,18 @@ def _is_attr_overidden(tx, var, name):
 def call_torch_function(
     tx, torch_function_type, torch_function_var, fn, types, args, kwargs
 ):
+    from .builder import SourcelessBuilder
+
     # signature:
     # def __torch_function__(cls, func, types, args=(), kwargs=None):
-    tf_args = (torch_function_type, fn, types, TupleVariable(list(args)))
-    return tx.inline_user_function_return(torch_function_var, tf_args, kwargs)
+    tf_args = (
+        torch_function_type,
+        fn,
+        types,
+        SourcelessBuilder()(tx, tuple(args)),
+        SourcelessBuilder()(tx, kwargs),
+    )
+    return tx.inline_user_function_return(torch_function_var, tf_args, {})
 
 
 def build_torch_function_fn(tx, value, source):
@@ -146,21 +156,23 @@ class TensorWithTFOverrideVariable(TensorVariable):
             kwargs.pop("class_type") is torch.Tensor
         ), "invalid class type in TensorWithTFOverrideVariable.from_tensor_var"
         var = cls(torch_function_fn=torch_function_fn, class_type=class_type, **kwargs)
-        var.install_global(tx)
+        var.install_global_unsafe(tx)
         return var
 
-    def install_global(self, tx):
+    def install_global_unsafe(self, tx):
         # stash the subclass type to rewrap an output tensor if needed
         # this is needed because the actual type needs to be available
         # each time the compiled artifact is run and outputs a wrapped tensor.
         if self.global_mangled_class_name() not in tx.output.global_scope:
-            tx.output.install_global(self.global_mangled_class_name(), self.class_type)
+            tx.output.install_global_unsafe(
+                self.global_mangled_class_name(), self.class_type
+            )
 
     def python_type(self):
         return self.class_type
 
     def class_type_var(self):
-        return UserDefinedClassVariable(
+        return TensorSubclassVariable(
             self.class_type, source=GlobalSource(self.global_mangled_class_name())
         )
 
