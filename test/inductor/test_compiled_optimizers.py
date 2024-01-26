@@ -81,12 +81,9 @@ def build_compiled_opt_kwarg_db():
         if optim_info.optim_cls not in KERNEL_COUNTS:
             continue
 
-        for optim_inputs in optim_info.optim_inputs_func():
-            for device in ["cpu", "cuda"]:
+        for device in ["cpu", "cuda"]:
+            for optim_inputs in optim_info.optim_inputs_func(device):
                 for foreach in [True, False]:
-                    if device == "cpu" and "capturable" in optim_inputs.kwargs:
-                        continue
-
                     kwargs = dict(optim_inputs.kwargs)
                     name = (
                         f"test_{optim_info.optim_cls.__name__.lower()}"
@@ -100,8 +97,11 @@ def build_compiled_opt_kwarg_db():
 
                     name += f"_{device}"
 
-                    # Eager for-loop impl doesn't support capturable ASGD
-                    if name == "test_asgd_capturable_cuda":
+                    # Eager for-loop impl doesn't support capturable ASGD nor Adamax (see #117836)
+                    if name in [
+                        "test_asgd_capturable_cuda",
+                        "test_adamax_capturable_cuda",
+                    ]:
                         continue
 
                     kwargs["foreach"] = foreach

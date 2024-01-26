@@ -62,6 +62,10 @@ class TestOptimRenewed(TestCase):
         optim_cls = optim_info.optim_cls
         optim_inputs = optim_info.optim_inputs_func(device=device)
         for optim_input in optim_inputs:
+            # See https://github.com/pytorch/pytorch/issues/117836
+            if optim_cls.__name__ == "Adamax" and optim_input.kwargs.get("capturable", False):
+                continue
+
             if "foreach" in optim_info.supported_impls:
                 optim_input.kwargs["foreach"] = False  # force forloop
             if contiguous:
@@ -94,12 +98,17 @@ class TestOptimRenewed(TestCase):
                 self.assertLess(closure().item(), initial_value)
 
 
+    @onlyCUDA
     @unittest.skipIf(not TEST_MULTIGPU, "only one GPU detected")
     @optims(optim_db, dtypes=[torch.float32])
     def test_forloop_goes_right_direction_multigpu(self, device, dtype, optim_info):
         optim_cls = optim_info.optim_cls
-        optim_inputs = optim_info.optim_inputs_func(device="cuda")
+        optim_inputs = optim_info.optim_inputs_func(device=device)
         for optim_input in optim_inputs:
+            # See https://github.com/pytorch/pytorch/issues/117836
+            if optim_cls.__name__ == "Adamax" and optim_input.kwargs.get("capturable", False):
+                continue
+
             if "foreach" in optim_info.supported_impls:
                 optim_input.kwargs["foreach"] = False  # force forloop
             weight = Parameter(torch.randn((10, 5), device="cuda:0", dtype=dtype))
@@ -133,8 +142,15 @@ class TestOptimRenewed(TestCase):
     def test_complex(self, device, dtype, optim_info):
         optim_cls = optim_info.optim_cls
         # Skip differentiable testing for now, see https://github.com/pytorch/pytorch/issues/116490
-        all_optim_inputs = _get_optim_inputs_including_global_cliquey_kwargs(device, dtype, optim_info, skip=("differentiable",))
+        # Also skip fused, since our fused kernels do not support complex
+        all_optim_inputs = _get_optim_inputs_including_global_cliquey_kwargs(
+            device, dtype, optim_info, skip=("differentiable", "fused"))
         for optim_input in all_optim_inputs:
+            # See https://github.com/pytorch/pytorch/issues/117836
+            if (optim_cls.__name__ == "Adamax" and optim_input.kwargs.get("capturable", False)
+                    and not optim_input.kwargs.get("foreach", False)):
+                continue
+
             complex_params = [torch.randn(2, 3, device=device, dtype=dtype, requires_grad=True) for _ in range(3)]
             real_params = [torch.view_as_real(p).detach().clone().requires_grad_(True) for p in complex_params]
 
@@ -170,11 +186,16 @@ class TestOptimRenewed(TestCase):
         for optim_input in optim_inputs:
             updated_params, state = [], []
             kwargs = deepcopy(optim_input.kwargs)
-            if (kwargs.get("capturable", False) and str(device) == "cpu"):
+            if kwargs.get("capturable", False) and str(device) == "cpu":
                 # capturable is not supported on CPU
                 continue
             for flag_value in (False, True):
+                # See https://github.com/pytorch/pytorch/issues/117836
+                if optim_cls.__name__ == "Adamax" and kwargs.get("capturable", False) and not flag_value:
+                    kwargs["capturable"] = False
+
                 kwargs[flag] = flag_value
+
                 input = torch.tensor(
                     [0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=dtype, device=device
                 ).reshape(3, 2)
@@ -276,8 +297,8 @@ class TestOptimRenewed(TestCase):
         for optim_input in optim_inputs:
             updated_params, state = [], []
             kwargs = deepcopy(optim_input.kwargs)
-            if kwargs.get("capturable", False) and str(device) == "cpu":
-                # capturable is not supported on CPU
+            if kwargs.get("capturable", False) and (str(device) == "cpu" or optim_cls.__name__ == "Adamax"):
+                # capturable is not supported on CPU nor for single-tensor Adamax, see #117836
                 continue
             for use_impl in (False, True):
                 kwargs[impl] = use_impl
@@ -323,16 +344,18 @@ class TestOptimRenewed(TestCase):
         # default dtype is higher prec float64
         old_default_dtype = torch.get_default_dtype()
         for default_dtype in [torch.float64, torch.float16]:
-            torch.set_default_dtype(default_dtype)
-            self._test_derived_optimizers(
-                device,
-                dtype,
-                optim_info,
-                "foreach",
-                reduced_precision=default_dtype == torch.float16,
-                assert_step_dtype=torch.float64 if default_dtype == torch.float64 else torch.float32,
-            )
-            torch.set_default_dtype(old_default_dtype)
+            try:
+                torch.set_default_dtype(default_dtype)
+                self._test_derived_optimizers(
+                    device,
+                    dtype,
+                    optim_info,
+                    "foreach",
+                    reduced_precision=default_dtype == torch.float16,
+                    assert_step_dtype=torch.float64 if default_dtype == torch.float64 else torch.float32,
+                )
+            finally:
+                torch.set_default_dtype(old_default_dtype)
 
 
 
@@ -360,6 +383,9 @@ class TestOptimRenewed(TestCase):
             max_mems = []
             for flag_value in (False, True):
                 kwargs["foreach"] = flag_value
+                # See https://github.com/pytorch/pytorch/issues/117836
+                if optim_cls.__name__ == "Adamax" and kwargs.get("capturable", False) and not flag_value:
+                    kwargs["capturable"] = False
 
                 # The 128 is critical here! Our CUDACachingAllocator allocates in blocks of 512,
                 # meaning any tensor that occupies <512 bytes of memory will allocate a whole
@@ -461,6 +487,11 @@ class TestOptimRenewed(TestCase):
         # Skip differentiable testing for now, see https://github.com/pytorch/pytorch/issues/116490
         all_optim_inputs = _get_optim_inputs_including_global_cliquey_kwargs(device, dtype, optim_info, skip=("differentiable",))
         for optim_input in all_optim_inputs:
+            # See https://github.com/pytorch/pytorch/issues/117836
+            if (optim_cls.__name__ == "Adamax" and optim_input.kwargs.get("capturable", False)
+                    and not optim_input.kwargs.get("foreach", False)):
+                continue
+
             weight_kwargs = optim_input.kwargs
             bias_kwargs = deepcopy(optim_input.kwargs)
             bias_kwargs["weight_decay"] = 0.0
@@ -497,6 +528,11 @@ class TestOptimRenewed(TestCase):
         # Skip differentiable testing for now, see https://github.com/pytorch/pytorch/issues/116490
         all_optim_inputs = _get_optim_inputs_including_global_cliquey_kwargs(device, dtype, optim_info, skip=("differentiable",))
         for optim_input in all_optim_inputs:
+            # See https://github.com/pytorch/pytorch/issues/117836
+            if (optim_cls.__name__ == "Adamax" and optim_input.kwargs.get("capturable", False)
+                    and not optim_input.kwargs.get("foreach", False)):
+                continue
+
             # optim_input.kwargs will be the param group kwargs, which should have >0 lr
             if "lr" not in optim_input.kwargs or optim_input.kwargs["lr"] == 0:
                 optim_input.kwargs["lr"] = 1e-3
@@ -552,6 +588,11 @@ class TestOptimRenewed(TestCase):
             return torch.tensor([1], device=device, dtype=dtype)
 
         for optim_input in all_optim_inputs:
+            # See https://github.com/pytorch/pytorch/issues/117836
+            if (optim_cls.__name__ == "Adamax" and optim_input.kwargs.get("capturable", False)
+                    and not optim_input.kwargs.get("foreach", False)):
+                continue
+
             optimizer = optim_cls(params, **optim_input.kwargs)
             optimizer.step(closure)
             self.assertEqual(old_params, params)
@@ -570,6 +611,10 @@ class TestOptimRenewed(TestCase):
         for optim_input in all_optim_inputs:
             kwargs = optim_input.kwargs
 
+            # See https://github.com/pytorch/pytorch/issues/117836
+            if optim_cls.__name__ == "Adamax" and kwargs.get("capturable", False) and not kwargs.get("foreach", False):
+                continue
+
             # params will decay even if grads are empty if weight_decay != 0,
             # and capturable doesn't work for CPU tensors
             if kwargs.get("weight_decay", 0) != 0:
@@ -577,7 +622,7 @@ class TestOptimRenewed(TestCase):
 
             # AdamW params will be updated regardless of grads due to lr, so make lr smaller
             if optim_cls.__name__ == "AdamW":
-                kwargs["lr"] = torch.tensor(1e-4) if isinstance(kwargs.get("lr", 1e-4), torch.Tensor) else 1e-4
+                kwargs["lr"] = torch.tensor(1e-5) if isinstance(kwargs.get("lr", 1e-5), torch.Tensor) else 1e-5
 
             if kwargs.get("differentiable", False):
                 params = [param.clone()]
@@ -604,6 +649,11 @@ class TestOptimRenewed(TestCase):
         all_optim_inputs = _get_optim_inputs_including_global_cliquey_kwargs(device, dtype, optim_info)
         params = [Parameter(torch.randn(2, 3, requires_grad=True, device=device, dtype=dtype)) for _ in range(2)]
         for optim_input in all_optim_inputs:
+            # See https://github.com/pytorch/pytorch/issues/117836
+            if (optim_cls.__name__ == "Adamax" and optim_input.kwargs.get("capturable", False)
+                    and not optim_input.kwargs.get("foreach", False)):
+                continue
+
             optimizer = optim_cls(params, **optim_input.kwargs)
             optimizer.__repr__()
 
@@ -626,6 +676,11 @@ class TestOptimRenewed(TestCase):
             return loss
 
         for optim_input in all_optim_inputs:
+            # See https://github.com/pytorch/pytorch/issues/117836
+            if (optim_cls.__name__ == "Adamax" and optim_input.kwargs.get("capturable", False)
+                    and not optim_input.kwargs.get("foreach", False)):
+                continue
+
             optimizer = optim_cls(params, **optim_input.kwargs)
             closure = functools.partial(fwd_bwd, optimizer, weight, bias, input)
 
@@ -669,6 +724,11 @@ class TestOptimRenewed(TestCase):
         # Skip differentiable testing for now, see https://github.com/pytorch/pytorch/issues/116490
         all_optim_inputs = _get_optim_inputs_including_global_cliquey_kwargs(device, dtype, optim_info, skip=("differentiable",))
         for optim_input in all_optim_inputs:
+            # See https://github.com/pytorch/pytorch/issues/117836
+            if (optim_cls.__name__ == "Adamax" and optim_input.kwargs.get("capturable", False)
+                    and not optim_input.kwargs.get("foreach", False)):
+                continue
+
             torch.manual_seed(1)
             model = torch.nn.Sequential(
                 torch.nn.Conv2d(4, 2, 1, stride=2),
@@ -730,7 +790,11 @@ class TestOptimRenewed(TestCase):
             return lbfgs_loss if optim_cls.__name__ == "LBFGS" else None
 
         for optim_input in all_optim_inputs:
-            optimizer = optim_cls(params, **optim_input.kwargs)
+            kwargs = optim_input.kwargs
+            # See https://github.com/pytorch/pytorch/issues/117836
+            if optim_cls.__name__ == "Adamax" and kwargs.get("capturable", False) and not kwargs.get("foreach", False):
+                continue
+            optimizer = optim_cls(params, **kwargs)
             for _ in range(3):
                 optimizer.step(closure)
             state_dict = deepcopy(optimizer.state_dict())
@@ -757,6 +821,11 @@ class TestOptimRenewed(TestCase):
             return lbfgs_loss if optim_cls.__name__ == "LBFGS" else None
 
         for optim_input in cpu_optim_inputs:
+            # See https://github.com/pytorch/pytorch/issues/117836
+            if (optim_cls.__name__ == "Adamax" and optim_input.kwargs.get("capturable", False)
+                    and not optim_input.kwargs.get("foreach", False)):
+                continue
+
             params = [Parameter(torch.randn(2, 3, device="cpu", dtype=dtype)) for _ in range(2)]
             for p in params:
                 p.grad = torch.randn_like(p)
@@ -820,6 +889,11 @@ class TestOptimRenewed(TestCase):
             return {k for k in obj.__dict__ if not k.startswith("_")}
 
         for optim_input in all_optim_inputs:
+            # See https://github.com/pytorch/pytorch/issues/117836
+            if (optim_cls.__name__ == "Adamax" and optim_input.kwargs.get("capturable", False)
+                    and not optim_input.kwargs.get("foreach", False)):
+                continue
+
             optimizer = optim_cls(params, **optim_input.kwargs)
 
             # Make some state
