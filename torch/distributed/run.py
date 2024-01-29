@@ -376,7 +376,7 @@ import os
 import sys
 import uuid
 from argparse import REMAINDER, ArgumentParser
-from typing import Callable, List, Tuple, Union
+from typing import Callable, List, Tuple, Union, Optional, Set
 
 import torch
 from torch.distributed.argparse_util import check_env, env
@@ -546,6 +546,16 @@ def get_args_parser() -> ArgumentParser:
         type=str,
         default="0",
         help="Tee std streams into a log file and also to console (see --redirects for format).",
+    )
+
+    parser.add_argument(
+        "--filter-ranks",
+        "--filter_ranks",
+        action=env,
+        type=str,
+        default="",
+        help="Only show logs from specified ranks in console (e.g. [--filter-ranks 0 1 2] will "
+        "only show logs from rank 0, 1 and 2). When used with --tee, logs will still be saved to files",
     )
 
     #
@@ -724,6 +734,16 @@ def config_from_args(args) -> Tuple[LaunchConfig, Union[Callable, str], List[str
 
     rdzv_endpoint = get_rdzv_endpoint(args)
 
+    ranks: Optional[Set[int]] = None
+    if args.filter_ranks:
+        try:
+            ranks = set(map(int, args.filter_ranks.split(",")))
+            assert ranks
+        except Exception as e:
+            raise Exception(
+                "--filter_ranks must be a comma-separated list of integers e.g. --filter_ranks=0,1,2"
+            ) from e
+
     config = LaunchConfig(
         min_nodes=min_nodes,
         max_nodes=max_nodes,
@@ -741,6 +761,7 @@ def config_from_args(args) -> Tuple[LaunchConfig, Union[Callable, str], List[str
         log_dir=args.log_dir,
         log_line_prefix_template=log_line_prefix_template,
         local_addr=args.local_addr,
+        filter_ranks=ranks,
     )
 
     with_python = not args.no_python
