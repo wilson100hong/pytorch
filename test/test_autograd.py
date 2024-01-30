@@ -8855,6 +8855,17 @@ get_out().sum().backward()
 
             _test_fn(chain_with_only_current_view_func, torch.randn(2, 3, 4))
 
+            # TODO: Move this somewhere else
+            # test NT views
+            from torch.nested._internal.nested_tensor import nested_view_from_values_offsets
+
+            values = torch.randn(10, 5)
+            offsets = torch.tensor([0, 3, 6, 10])
+            _test_fn(nested_view_from_values_offsets, values, offsets)
+
+            nt = nested_view_from_values_offsets(values, offsets).clone().detach()
+            _test_fn(torch.ops.aten._nested_get_values.default, nt, use_unsafe_fwd=True)
+
     def test_setup_context_when_forward_has_default_args(self):
         class PowFunction(Function):
             @staticmethod
