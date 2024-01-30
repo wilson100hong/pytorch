@@ -1100,16 +1100,18 @@ def cat(inputs, dim=0):
 
     # TODO: We observed negative performance impact of pointwise_cat optimization on CPU so disabled it.
     #             We will revisit this later after enabling vectorization on index_expr.
-    if (
-        len(inputs) <= config.max_pointwise_cat_inputs
-        and inputs[0].get_device().type != "cpu"
+    if inputs[0].get_device().type == "cpu" or (
+        config.max_pointwise_cat_inputs is not None
+        and len(inputs) > config.max_pointwise_cat_inputs
     ):
-        pointwise_uses = all(is_pointwise_use(use) for use in V.current_node.users)
-        all_pointwise_inputs = all(should_lower_cat_input(inp) for inp in inputs)
-        any_pointwise_inputs = any(should_lower_cat_input(inp) for inp in inputs)
+        return TensorBox(ir.ConcatKernel.create(inputs, dim))
 
-        if all_pointwise_inputs or (any_pointwise_inputs and pointwise_uses):
-            return pointwise_cat(inputs, dim)
+    pointwise_uses = all(is_pointwise_use(use) for use in V.current_node.users)
+    all_pointwise_inputs = all(should_lower_cat_input(inp) for inp in inputs)
+    any_pointwise_inputs = any(should_lower_cat_input(inp) for inp in inputs)
+
+    if all_pointwise_inputs or (any_pointwise_inputs and pointwise_uses):
+        return pointwise_cat(inputs, dim)
 
     return TensorBox(ir.ConcatKernel.create(inputs, dim))
 
