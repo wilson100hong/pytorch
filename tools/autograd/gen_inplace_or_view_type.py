@@ -4,7 +4,7 @@
 # if updates are needed in torch/csrc/autograd/autograd_not_implemented_fallback.cpp
 # The fallback is expected to mimick this codegen, so we should keep the two in sync.
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from torchgen.api import cpp
 from torchgen.api.autograd import (
@@ -172,7 +172,7 @@ for (auto ${view_idx} : c10::irange(${var}.size())) {
 
 SETUP_REPLAY_VIEW_IF_NOT_SUPPORT_AS_STRIDED_OR_VIEW_WITH_METADATA_CHANGE = CodeTemplate(
     """\
-std::function<at::Tensor(const at::Tensor&)> func=nullptr;
+std::shared_ptr<torch::autograd::ViewFunc> func(nullptr);
 std::function<at::Tensor(const at::Tensor&)> rev_func=nullptr;
 if (${is_view_with_metadata_change} ||
     !self.unsafeGetTensorImpl()->support_as_strided() ||
@@ -184,11 +184,9 @@ if (${is_view_with_metadata_change} ||
 """
 )
 
-REPLAY_VIEW_LAMBDA_FUNC = CodeTemplate(
+REPLAY_VIEW_FUNC = CodeTemplate(
     """\
-func = [=](const at::Tensor& ${input_base}) {
-  return ${replay_view_call}${view_indexing};
-};
+func = std::make_shared<${view_func_name}>(${view_func_args});
 """
 )
 
@@ -281,6 +279,25 @@ def inverse_view_name(f: NativeFunction) -> str:
     return f"{copy_variant}{overload}_inverse"
 
 
+# e.g. as_strided -> AsStridedViewFunc for camel case or
+# as_strided_view_func otherwise
+def view_func_name(
+    f: NativeFunction, include_namespace: bool = False, camel_case: bool = True
+) -> str:
+    name = f.func.name.unambiguous_name()
+    view_func_name = f"{name.replace('.', '_')}_view_func"
+    if camel_case:
+        is_private = view_func_name.startswith("_")
+        view_func_name = "".join(
+            [p.title() for p in view_func_name.replace(".", "_").split("_")]
+        )
+        if is_private:
+            # put the leading underscore back in
+            view_func_name = f"_{view_func_name}"
+    namespace = "torch::autograd::generated::" if include_namespace else ""
+    return f"{namespace}{view_func_name}"
+
+
 def extract_bindings(f: NativeFunction) -> List[Binding]:
     return [
         r
@@ -346,24 +363,13 @@ def get_view_info(f: NativeFunction) -> Optional[str]:
     return view_info
 
 
-# For view replay calls, we generate an ordinary Dispatcher::call() instead, because:
-#  - We want to replay the entire call into the op, including any previously-set dispatch keys (including autograd!).
-#  - The view replay call also is not part of the hot path.
-def emit_view_call(
-    f: NativeFunction, input_base: str, unpacked_args: Sequence[str]
-) -> str:
-    # View replay functions use the standard Dispatcher::call API.
-    return CALL_DISPATCH.substitute(
-        unambiguous_name=f.func.name.unambiguous_name(), unpacked_args=unpacked_args
-    )
-
-
 def emit_view_lambda(
     f: NativeFunction, bindings: List[Binding], view_idx: Optional[str] = None
 ) -> str:
     """Generate an additional lambda function to recover views in backward when as_strided is not supported.
     See Note [View + Inplace update for base tensor] and [View + Inplace update for view tensor] for more details.
     """
+    # TODO: Clean all this up (it's mostly no longer needed if we're not dealing with lambdas)
     input_base = "input_base"
     replay_view_func = ""
     updated_args: List[str] = []
@@ -412,11 +418,13 @@ def emit_view_lambda(
         else:
             updated_args.append(arg)
 
-    replay_view_call = emit_view_call(f, input_base, updated_args)
-    replay_view_func += REPLAY_VIEW_LAMBDA_FUNC.substitute(
-        input_base=input_base,
-        replay_view_call=replay_view_call,
-        view_indexing=("" if view_idx is None else f"[{view_idx}]"),
+    # skip input_base arg
+    view_func_args = list(updated_args[1:])
+    if view_idx is not None:
+        view_func_args.append(f"{view_idx}")
+    replay_view_func += REPLAY_VIEW_FUNC.substitute(
+        view_func_name=view_func_name(f, include_namespace=True),
+        view_func_args=view_func_args,
     )
 
     input_view = "input_view"
@@ -467,6 +475,7 @@ def emit_view_body(
         )
     if len(differentiable_output_vars) == 0:
         # no output is differentiable (.indices() for SparseTensors for example)
+        # TODO: Remove this? how does this work
         rhs_value = (
             f"as_view({view_info}, {var}, "
             f"/* is_bw_differentiable */ false, /* is_fw_differentiable */ false)"

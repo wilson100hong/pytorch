@@ -547,7 +547,7 @@ static PyObject* view_func_impl(
         torch::autograd::utils::has_same_meta(new_base, view_info.base_)) {
       // Do the actual view replay
       if (view_info.has_view_fn()) {
-        out = view_info.view_fn()(new_base);
+        out = (*view_info.view_fn())(new_base);
       } else {
         out = new_base.as_strided(
             self.sizes(), self.strides(), self.storage_offset());
@@ -592,6 +592,70 @@ static PyObject* THPVariable_rev_view_func_unsafe(
     PyObject* self_,
     PyObject* arg) {
   return rev_view_func_impl(self_, arg);
+}
+
+// TODO: Change the name of this / merge it with view_func_unsafe()
+static PyObject* THPVariable_full_view_func_unsafe(
+    PyObject* self_,
+    PyObject* args) {
+  HANDLE_TH_ERRORS
+  auto& self = THPVariable_Unpack(self_);
+  Py_ssize_t nargs = args ? PyTuple_GET_SIZE(args) : 0;
+  TORCH_CHECK(
+      nargs == 3,
+      "expected usage: _full_view_func(new_root, symint_visitor_fn, tensor_visitor_fn)");
+  PyObject* new_root_obj = PyTuple_GET_ITEM(args, 0);
+  TORCH_CHECK(
+      THPVariable_Check(new_root_obj),
+      "_full_view_func expects the first argument to be a Tensor");
+  const auto& new_root = THPVariable_Unpack(new_root_obj);
+
+  PyObject* symint_visitor_fn = PyTuple_GET_ITEM(args, 1);
+  PyObject* tensor_visitor_fn = PyTuple_GET_ITEM(args, 2);
+
+  // Ensure that self is indeed a backward differentiable view
+  // If not, we return an undefined Tensor (None) and let the user handle it.
+  auto diff_view_meta = torch::autograd::impl::get_view_autograd_meta(self);
+  at::Tensor out;
+  if (diff_view_meta && diff_view_meta->has_bw_view()) {
+    auto& view_info = diff_view_meta->get_backward_view();
+    // Do the actual view replay
+    TORCH_CHECK(view_info.has_view_fn(), "No view func found");
+    auto view_func = view_info.view_fn();
+
+    std::vector<c10::SymInt> symints;
+    const auto old_symints = view_func->get_symints();
+    symints.reserve(old_symints.size());
+    for (const c10::SymInt& s : old_symints) {
+      PyObject* res =
+          PyObject_CallOneArg(symint_visitor_fn, torch::toPyObject(s));
+      TORCH_CHECK(
+          torch::is_symint(py::handle(res)) || PyInt_Check(res),
+          "Expected symint_visitor_fn to return int or SymInt");
+      symints.push_back(py::cast<c10::SymInt>(py::handle(res)));
+    }
+
+    std::vector<at::Tensor> tensors;
+    const auto old_tensors = view_func->get_tensors();
+    tensors.reserve(old_tensors.size());
+    for (const at::Tensor& t : view_func->get_tensors()) {
+      PyObject* res =
+          PyObject_CallOneArg(tensor_visitor_fn, THPVariable_Wrap(t));
+      TORCH_CHECK(
+          THPVariable_Check(res),
+          "Expected tensor_visitor_fn to return Tensor");
+      tensors.push_back(THPVariable_Unpack(res));
+    }
+
+    // TODO: Use RAII properly to set old symints / tensors in case of error.
+    view_func->set_symints(symints);
+    view_func->set_tensors(tensors);
+    out = (*view_func)(new_root);
+    view_func->set_symints(old_symints);
+    view_func->set_tensors(old_tensors);
+  }
+  return THPVariable_Wrap(std::move(out));
+  END_HANDLE_TH_ERRORS
 }
 
 // Instantiates a subclass of self with the same data.
@@ -1673,6 +1737,10 @@ static PyMethodDef extra_methods[] = {
     {"_rev_view_func_unsafe",
      THPVariable_rev_view_func_unsafe,
      METH_O,
+     nullptr},
+    {"_full_view_func_unsafe",
+     THPVariable_full_view_func_unsafe,
+     METH_VARARGS,
      nullptr},
     {nullptr}};
 

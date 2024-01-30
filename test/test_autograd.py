@@ -8838,7 +8838,7 @@ get_out().sum().backward()
                     x = x.split_with_sizes([1, 3], -1)[0]
 
                 with torch.autograd._force_original_view_tracking(False):
-                    x = x.chunk(2, -1)
+                    x = x.chunk(2, 0)
 
                 return x
 
